@@ -1,23 +1,29 @@
 """
-가공 견적 AI 엔진 PRO v2.1
+가공 견적 AI 엔진 PRO v2.2
 main.py — Streamlit 메인 UI
 
 변경사항 (v2.1 → v2.2):
-- [버그] 업체 추가 탭: rerun 후 탭이 초기화되는 문제 수정
-  → st.session_state로 활성 탭 위치 유지
-- [강화] 감사 이력 검색: 날짜 범위 / 오차율 범위 / 통합 텍스트 검색 추가
-- [신규] 유사 부품 매칭: 감사 결과 하단에 자동 표시
-  → 부피 ±20%, 홀 ±2개, 셋업 동일 조건으로 전 업체 이력 검색
-  → 협상 근거 문구 자동 생성
+- [버그] 업체 추가 탭: rerun 후 탭 초기화 문제 수정
+- [강화] 감사 이력 검색: 날짜 범위 / 오차율 범위 / 통합 텍스트 검색
+- [신규] 유사 부품 매칭: 감사 결과 하단 자동 표시 + 협상 문구 생성
+- [신규] 업체별 예상 단가 시뮬레이션 페이지
+- [신규] 협상 근거 엑셀 리포트 다운로드
 """
 
-import streamlit as st
-import pandas as pd
+import io
 import sqlite3
 import tempfile
 import os
-from pathlib import Path
 from datetime import datetime, date
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import (
+    Font, PatternFill, Alignment, Border, Side, numbers
+)
+from openpyxl.utils import get_column_letter
 
 from engine import (
     audit, audit_scenario, AuditResult,
@@ -31,7 +37,9 @@ BASE_DIR = Path(__file__).parent
 DB_PATH  = BASE_DIR / "data" / "history_log.db"
 
 
-# ── DB 초기화 ──────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# DB 초기화
+# ══════════════════════════════════════════════════════════════
 def init_db():
     """DB 파일 및 테이블 초기화. 앱 시작 시 1회 실행."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -82,9 +90,10 @@ def init_db():
         conn.close()
 
 
-# ── 업체 CRUD ──────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 업체 CRUD
+# ══════════════════════════════════════════════════════════════
 def load_vendors(active_only=True) -> pd.DataFrame:
-    """vendors 테이블 조회. active_only=True이면 활성 업체만 반환."""
     conn = sqlite3.connect(DB_PATH)
     try:
         q = "SELECT * FROM vendors"
@@ -95,8 +104,7 @@ def load_vendors(active_only=True) -> pd.DataFrame:
         conn.close()
 
 
-def add_vendor(name: str, contact="", phone="", email="", note=""):
-    """신규 업체 등록."""
+def add_vendor(name, contact="", phone="", email="", note=""):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
@@ -108,8 +116,7 @@ def add_vendor(name: str, contact="", phone="", email="", note=""):
         conn.close()
 
 
-def update_vendor(vid: int, name: str, contact: str, phone: str, email: str, note: str):
-    """업체 정보 수정."""
+def update_vendor(vid, name, contact, phone, email, note):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
@@ -121,8 +128,7 @@ def update_vendor(vid: int, name: str, contact: str, phone: str, email: str, not
         conn.close()
 
 
-def deactivate_vendor(vid: int):
-    """업체 비활성화 (이력 보존)."""
+def deactivate_vendor(vid):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("UPDATE vendors SET is_active=0 WHERE id=?", (vid,))
@@ -131,25 +137,24 @@ def deactivate_vendor(vid: int):
         conn.close()
 
 
-def vendor_has_history(vid: int) -> bool:
-    """해당 업체의 감사 이력 존재 여부 확인."""
+def vendor_has_history(vid) -> bool:
     conn = sqlite3.connect(DB_PATH)
     try:
-        count = conn.execute(
+        return conn.execute(
             "SELECT COUNT(*) FROM history_log WHERE vendor_id=?", (vid,)
-        ).fetchone()[0]
-        return count > 0
+        ).fetchone()[0] > 0
     finally:
         conn.close()
 
 
-# ── 이력 저장·조회 ──────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 이력 저장·조회
+# ══════════════════════════════════════════════════════════════
 def save_to_db(part_name, part_no, step_file, material_code,
                vendor_id, vendor_name, result: AuditResult,
                difficulty_level, estimated_hours,
                volume_cm3=None, hole_count=None, setup_count=None,
                price_snapshot=None, note=""):
-    """감사 결과 1건을 history_log에 저장."""
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
@@ -175,20 +180,16 @@ def save_to_db(part_name, part_no, step_file, material_code,
 
 
 def load_history() -> pd.DataFrame:
-    """전체 감사 이력 조회 (최신순)."""
     if not DB_PATH.exists():
         return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     try:
-        return pd.read_sql(
-            "SELECT * FROM history_log ORDER BY created_at DESC", conn
-        )
+        return pd.read_sql("SELECT * FROM history_log ORDER BY created_at DESC", conn)
     finally:
         conn.close()
 
 
-def load_vendor_history(vendor_id: int) -> pd.DataFrame:
-    """특정 업체의 감사 이력 조회."""
+def load_vendor_history(vendor_id) -> pd.DataFrame:
     conn = sqlite3.connect(DB_PATH)
     try:
         return pd.read_sql(
@@ -200,90 +201,339 @@ def load_vendor_history(vendor_id: int) -> pd.DataFrame:
 
 
 def load_vendor_stats() -> pd.DataFrame:
-    """업체별 감사 통계 집계."""
+    if not DB_PATH.exists():
+        return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     try:
-        return pd.read_sql("""
+        try:
+            return pd.read_sql("""
             SELECT
                 v.id, v.name,
-                COUNT(h.id)                                                 AS total,
-                ROUND(AVG(h.variance_pct), 1)                              AS avg_variance,
-                ROUND(MIN(h.variance_pct), 1)                              AS min_variance,
-                ROUND(MAX(h.variance_pct), 1)                              AS max_variance,
-                SUM(COALESCE(h.ordered, 0))                                AS ordered_count,
-                ROUND(AVG(h.material_cost / NULLIF(h.vendor_price,0)*100), 1) AS mat_ratio
+                COUNT(h.id)                                                    AS total,
+                ROUND(AVG(h.variance_pct), 1)                                  AS avg_variance,
+                ROUND(MIN(h.variance_pct), 1)                                  AS min_variance,
+                ROUND(MAX(h.variance_pct), 1)                                  AS max_variance,
+                SUM(COALESCE(h.ordered, 0))                                    AS ordered_count,
+                ROUND(AVG(h.material_cost / NULLIF(h.vendor_price,0)*100), 1)  AS mat_ratio,
+                ROUND(AVG(h.actual_machining / NULLIF(h.standard_machining,0)), 3) AS avg_margin_ratio
             FROM vendors v
             LEFT JOIN history_log h ON v.id = h.vendor_id
             WHERE v.is_active = 1
             GROUP BY v.id
         """, conn)
+        except Exception:
+            return pd.DataFrame()
     finally:
         conn.close()
 
 
-def search_similar_parts(volume_cm3: float, hole_count: int,
-                         setup_count: int, exclude_id: int = None) -> pd.DataFrame:
-    """
-    유사 부품 이력 검색.
-    조건: 부피 ±20%, 홀 개수 ±2개, 셋업 횟수 동일.
-    전 업체 이력 대상. 부피 차이 오름차순 상위 8건 반환.
-    """
+def search_similar_parts(volume_cm3, hole_count, setup_count,
+                         exclude_id=None) -> pd.DataFrame:
+    """부피 ±20% / 홀 ±2개 / 셋업 동일 조건으로 전 업체 이력 검색."""
     if not DB_PATH.exists():
         return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     try:
-        params = [
-            volume_cm3 * 0.8, volume_cm3 * 1.2,  # 부피 범위
-            hole_count - 2, hole_count + 2,        # 홀 범위
-            setup_count,                            # 셋업 동일
-            volume_cm3,                             # vol_diff 계산용
-        ]
-        exclude_clause = ""
-        if exclude_id is not None:
-            exclude_clause = "AND h.id != ?"
-            params.append(exclude_id)
-
+        exclude_clause = f"AND h.id != {exclude_id}" if exclude_id else ""
         return pd.read_sql(f"""
             SELECT
-                h.id,
-                h.created_at,
-                h.part_name,
-                h.part_no,
-                h.vendor_name,
-                h.vendor_price,
-                h.material_cost,
-                h.variance_pct,
-                h.verdict,
-                h.volume_cm3,
-                h.hole_count,
-                h.setup_count,
-                h.difficulty_level,
-                h.ordered,
-                ABS(h.volume_cm3 - ?) AS vol_diff
+                h.id, h.created_at, h.part_name, h.part_no,
+                h.vendor_name, h.vendor_price, h.material_cost,
+                h.variance_pct, h.verdict,
+                h.volume_cm3, h.hole_count, h.setup_count, h.difficulty_level,
+                ABS(h.volume_cm3 - {volume_cm3}) AS vol_diff
             FROM history_log h
             WHERE
-                h.volume_cm3  BETWEEN ? AND ?
-                AND h.hole_count  BETWEEN ? AND ?
-                AND h.setup_count = ?
+                h.volume_cm3  BETWEEN {volume_cm3 * 0.8} AND {volume_cm3 * 1.2}
+                AND h.hole_count  BETWEEN {hole_count - 2} AND {hole_count + 2}
+                AND h.setup_count = {setup_count}
                 AND h.volume_cm3 IS NOT NULL
                 {exclude_clause}
             ORDER BY vol_diff ASC
             LIMIT 8
-        """, conn, params=[volume_cm3] + params[:-1] + ([exclude_id] if exclude_id else []))
+        """, conn)
     finally:
         conn.close()
 
 
-# ── 판정 UI ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 엑셀 리포트 생성
+# ══════════════════════════════════════════════════════════════
+def _cell_style(ws, row, col, value, bold=False, bg=None, align="left",
+                num_format=None, font_color="000000"):
+    """셀 하나에 값·스타일을 한번에 적용하는 헬퍼."""
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font = Font(bold=bold, color=font_color,
+                     name="맑은 고딕", size=10)
+    if bg:
+        cell.fill = PatternFill("solid", fgColor=bg)
+    thin = Side(style="thin", color="CCCCCC")
+    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    cell.alignment = Alignment(
+        horizontal=align, vertical="center", wrap_text=True
+    )
+    if num_format:
+        cell.number_format = num_format
+    return cell
+
+
+def build_report_excel(
+    part_name: str,
+    part_no: str,
+    vendor_name: str,
+    material_code: str,
+    result: AuditResult,
+    difficulty_level: int,
+    estimated_hours: float,
+    similar_df: pd.DataFrame,
+    sim_df: pd.DataFrame | None,
+    audit_date: str,
+) -> bytes:
+    """
+    협상 근거 엑셀 리포트를 생성하고 bytes로 반환한다.
+
+    시트 구성:
+      1. 감사 결과   — 역산 수치 + 판정 + 협상 문구
+      2. 유사 부품   — 유사 이력 비교표
+      3. 업체 시뮬   — 업체별 예상 단가 비교 (sim_df 있을 때만)
+    """
+    wb = Workbook()
+
+    # ── 공통 색상 ──────────────────────────────────────────
+    C_HEADER  = "2E4057"   # 네이비
+    C_SUB     = "4A90D9"   # 파랑
+    C_GREEN   = "E8F5E9"
+    C_RED     = "FFEBEE"
+    C_ORANGE  = "FFF3E0"
+    C_YELLOW  = "FFFDE7"
+    C_GRAY    = "F5F5F5"
+    C_WHITE   = "FFFFFF"
+
+    verdict_bg = {
+        "경고 · 과다 청구": C_RED,
+        "주의 · 소폭 과다": C_ORANGE,
+        "신뢰 · 적정":      C_GREEN,
+        "관찰 · 소폭 저가": C_YELLOW,
+        "경고 · 저가 수주": C_RED,
+    }
+
+    # ══════════════════════════════════════════════════════
+    # 시트 1: 감사 결과
+    # ══════════════════════════════════════════════════════
+    ws1 = wb.active
+    ws1.title = "감사 결과"
+    ws1.column_dimensions["A"].width = 22
+    ws1.column_dimensions["B"].width = 22
+    ws1.column_dimensions["C"].width = 18
+    ws1.column_dimensions["D"].width = 18
+    ws1.row_dimensions[1].height = 30
+
+    # 제목
+    ws1.merge_cells("A1:D1")
+    _cell_style(ws1, 1, 1, "가공 견적 역산 감사 리포트",
+                bold=True, bg=C_HEADER, align="center", font_color="FFFFFF")
+    ws1.cell(1, 1).font = Font(bold=True, color="FFFFFF",
+                                name="맑은 고딕", size=14)
+
+    # 기본 정보
+    ws1.merge_cells("A2:D2")
+    _cell_style(ws1, 2, 1, f"감사 일시: {audit_date}",
+                bg=C_GRAY, align="left")
+
+    row = 3
+    info_rows = [
+        ("부품명",   part_name),
+        ("형번",     part_no or "—"),
+        ("협력사",   vendor_name or "—"),
+        ("소재",     material_code),
+        ("난이도",   f"{difficulty_level}등급  ×{get_coefficient(difficulty_level)}"),
+        ("예상 가공시간", f"{estimated_hours:.1f} h"),
+    ]
+    for label, val in info_rows:
+        _cell_style(ws1, row, 1, label, bold=True, bg=C_GRAY)
+        ws1.merge_cells(f"B{row}:D{row}")
+        _cell_style(ws1, row, 2, val)
+        row += 1
+
+    row += 1
+    # 역산 수치 헤더
+    ws1.merge_cells(f"A{row}:D{row}")
+    _cell_style(ws1, row, 1, "역산 수치",
+                bold=True, bg=C_SUB, align="center", font_color="FFFFFF")
+    row += 1
+
+    num_rows = [
+        ("협력사 단가",   result.vendor_price,       "#,##0 원"),
+        ("재료비",        result.material_cost,       "#,##0 원"),
+        ("후처리비",      result.postprocess_cost,    "#,##0 원"),
+        ("실질 가공비",   result.actual_machining,    "#,##0 원"),
+        ("적정 가공비",   result.standard_machining,  "#,##0 원"),
+        ("오차율",        result.variance_pct,        "0.0 \"%\""),
+        ("임률",          result.hourly_rate,         "#,##0 원/h"),
+    ]
+    for label, val, fmt in num_rows:
+        _cell_style(ws1, row, 1, label, bold=True, bg=C_GRAY)
+        ws1.merge_cells(f"B{row}:D{row}")
+        _cell_style(ws1, row, 2, val, num_format=fmt)
+        row += 1
+
+    row += 1
+    # 판정
+    vbg = verdict_bg.get(result.verdict, C_WHITE)
+    ws1.merge_cells(f"A{row}:D{row}")
+    ws1.row_dimensions[row].height = 24
+    _cell_style(ws1, row, 1,
+                f"판정:  {result.verdict}  ({result.variance_pct:.1f}%)",
+                bold=True, bg=vbg, align="center")
+
+    row += 1
+    ws1.merge_cells(f"A{row}:D{row}")
+    _cell_style(ws1, row, 1, f"권장 액션:  {result.action}",
+                bg=vbg, align="center")
+
+    row += 2
+    # 협상 근거 문구
+    ws1.merge_cells(f"A{row}:D{row}")
+    _cell_style(ws1, row, 1, "협상 근거",
+                bold=True, bg=C_SUB, align="center", font_color="FFFFFF")
+    row += 1
+
+    # 과다/저가 여부에 따라 문구 생성
+    diff   = result.actual_machining - result.standard_machining
+    pct    = result.variance_pct
+    if pct > 110:
+        nego = (
+            f"협력사 단가 {result.vendor_price:,.0f}원 기준 실질 가공비가 "
+            f"적정 가공비({result.standard_machining:,.0f}원) 대비 "
+            f"{pct - 100:.1f}% 초과합니다.\n"
+            f"과다 청구 금액 추정: 약 {diff:,.0f}원\n"
+            f"적정 단가 제안: {result.vendor_price - diff:,.0f}원 수준"
+        )
+    elif pct < 80:
+        nego = (
+            f"협력사 단가 {result.vendor_price:,.0f}원은 "
+            f"적정 가공비({result.standard_machining:,.0f}원) 대비 "
+            f"{100 - pct:.1f}% 낮은 수준입니다.\n"
+            f"품질 조건 및 원자재 규격을 명기하고 진행을 권장합니다."
+        )
+    else:
+        nego = (
+            f"협력사 단가 {result.vendor_price:,.0f}원은 "
+            f"적정 가공비 기준 오차율 {pct:.1f}%로 적정 범위입니다.\n"
+            f"현재 단가로 발주를 진행해도 무방합니다."
+        )
+
+    ws1.merge_cells(f"A{row}:D{row + 2}")
+    c = ws1.cell(row=row, column=1, value=nego)
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    c.border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+    ws1.row_dimensions[row].height = 60
+
+    # ══════════════════════════════════════════════════════
+    # 시트 2: 유사 부품 비교
+    # ══════════════════════════════════════════════════════
+    ws2 = wb.create_sheet("유사 부품 비교")
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 18
+    ws2.column_dimensions["C"].width = 14
+    ws2.column_dimensions["D"].width = 16
+    ws2.column_dimensions["E"].width = 14
+    ws2.column_dimensions["F"].width = 12
+    ws2.column_dimensions["G"].width = 12
+
+    ws2.merge_cells("A1:G1")
+    _cell_style(ws2, 1, 1, "유사 부품 이력 비교",
+                bold=True, bg=C_HEADER, align="center", font_color="FFFFFF")
+    ws2.cell(1, 1).font = Font(bold=True, color="FFFFFF", name="맑은 고딕", size=12)
+
+    headers2 = ["일시", "부품명", "형번", "업체", "단가(원)", "오차율(%)", "판정"]
+    for ci, h in enumerate(headers2, 1):
+        _cell_style(ws2, 2, ci, h, bold=True, bg="4A90D9", font_color="FFFFFF")
+
+    if similar_df is not None and not similar_df.empty:
+        for ri, (_, row_data) in enumerate(similar_df.iterrows(), 3):
+            vbg2 = verdict_bg.get(str(row_data.get("verdict", "")), C_WHITE)
+            vals = [
+                str(row_data.get("created_at", ""))[:10],
+                row_data.get("part_name", ""),
+                row_data.get("part_no", "") or "—",
+                row_data.get("vendor_name", "") or "—",
+                row_data.get("vendor_price", 0),
+                row_data.get("variance_pct", 0),
+                row_data.get("verdict", ""),
+            ]
+            fmts = [None, None, None, None, "#,##0", "0.0", None]
+            for ci, (v, f) in enumerate(zip(vals, fmts), 1):
+                bg_use = vbg2 if ci == 7 else C_WHITE
+                _cell_style(ws2, ri, ci, v, num_format=f, bg=bg_use)
+    else:
+        ws2.merge_cells("A3:G3")
+        _cell_style(ws2, 3, 1, "유사 부품 이력이 없습니다.", bg=C_GRAY, align="center")
+
+    # ══════════════════════════════════════════════════════
+    # 시트 3: 업체별 예상 단가 시뮬레이션 (선택)
+    # ══════════════════════════════════════════════════════
+    if sim_df is not None and not sim_df.empty:
+        ws3 = wb.create_sheet("업체별 시뮬레이션")
+        ws3.column_dimensions["A"].width = 20
+        ws3.column_dimensions["B"].width = 16
+        ws3.column_dimensions["C"].width = 16
+        ws3.column_dimensions["D"].width = 16
+        ws3.column_dimensions["E"].width = 14
+        ws3.column_dimensions["F"].width = 18
+
+        ws3.merge_cells("A1:F1")
+        _cell_style(ws3, 1, 1, f"업체별 예상 단가 시뮬레이션 — {part_name}",
+                    bold=True, bg=C_HEADER, align="center", font_color="FFFFFF")
+        ws3.cell(1, 1).font = Font(bold=True, color="FFFFFF", name="맑은 고딕", size=12)
+
+        headers3 = ["업체명", "예상 단가(원)", "예상 가공비(원)", "재료비(원)", "예상 오차율(%)", "비고"]
+        for ci, h in enumerate(headers3, 1):
+            _cell_style(ws3, 2, ci, h, bold=True, bg="4A90D9", font_color="FFFFFF")
+
+        for ri, (_, row_data) in enumerate(sim_df.iterrows(), 3):
+            pct_v = row_data.get("예상오차율", 0)
+            if pct_v > 110:
+                row_bg = C_ORANGE
+            elif pct_v < 80:
+                row_bg = C_YELLOW
+            else:
+                row_bg = C_GREEN
+            vals3 = [
+                row_data.get("업체명", ""),
+                row_data.get("예상단가", 0),
+                row_data.get("예상가공비", 0),
+                row_data.get("재료비", 0),
+                pct_v,
+                row_data.get("비고", ""),
+            ]
+            fmts3 = [None, "#,##0", "#,##0", "#,##0", "0.0", None]
+            for ci, (v, f) in enumerate(zip(vals3, fmts3), 1):
+                bg_use = row_bg if ci in (2, 5) else C_WHITE
+                _cell_style(ws3, ri, ci, v, num_format=f, bg=bg_use)
+
+    # bytes 반환
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ══════════════════════════════════════════════════════════════
+# 판정 UI
+# ══════════════════════════════════════════════════════════════
 def render_verdict(result: AuditResult):
-    """판정 결과를 색상에 맞는 Streamlit 알림으로 표시."""
     fn = {"green": st.success, "orange": st.warning,
           "yellow": st.warning, "red": st.error}.get(result.color, st.info)
     fn(f"**{result.verdict}** ({result.variance_pct:.1f}%) — {result.action}")
 
 
 def render_cost_cards(result: AuditResult):
-    """재료비 / 실질 가공비 / 적정 가공비 메트릭 카드 3개 표시."""
     c1, c2, c3 = st.columns(3)
     c1.metric("재료비", f"{result.material_cost:,.0f} 원")
     c2.metric("실질 가공비", f"{result.actual_machining:,.0f} 원")
@@ -292,18 +542,12 @@ def render_cost_cards(result: AuditResult):
               delta=f"{delta:+,.0f} 원", delta_color="inverse")
 
 
-def render_similar_parts(volume_cm3: float, hole_count: int,
-                         setup_count: int, current_vendor_price: float,
-                         saved_id: int = None):
-    """
-    유사 부품 이력을 검색하여 표시하고 협상 근거 문구를 자동 생성.
-    volume_cm3 / hole_count / setup_count 가 모두 0이 아닌 경우에만 동작.
-    """
+def render_similar_parts(volume_cm3, hole_count, setup_count,
+                         current_vendor_price, saved_id=None):
+    """유사 부품 이력 표시 + 협상 문구 자동 생성."""
     if not (volume_cm3 and hole_count is not None and setup_count):
         return
-
-    similar = search_similar_parts(volume_cm3, hole_count, setup_count,
-                                   exclude_id=saved_id)
+    similar = search_similar_parts(volume_cm3, hole_count, setup_count, saved_id)
     if similar.empty:
         return
 
@@ -312,12 +556,11 @@ def render_similar_parts(volume_cm3: float, hole_count: int,
         f"부피 {volume_cm3:.0f}cm³ ±20% / 홀 {hole_count}개 ±2 / "
         f"셋업 {setup_count}회 기준 — 전 업체 대상"
     )
-
     col_map = {
         "created_at": "일시", "part_name": "부품명", "part_no": "형번",
         "vendor_name": "업체", "vendor_price": "단가",
         "variance_pct": "오차율(%)", "verdict": "판정",
-        "volume_cm3": "부피(cm³)", "hole_count": "홀", "setup_count": "셋업",
+        "volume_cm3": "부피(cm³)",
     }
     show_cols = [c for c in col_map if c in similar.columns]
     st.dataframe(
@@ -329,15 +572,12 @@ def render_similar_parts(volume_cm3: float, hole_count: int,
             "부피(cm³)": st.column_config.NumberColumn(format="%.1f"),
         }
     )
-
-    # ── 협상 근거 문구 자동 생성 ──────────────────────────────
     valid = similar[similar["vendor_price"].notna() & (similar["vendor_price"] > 0)]
     if not valid.empty:
         avg_price = valid["vendor_price"].mean()
         min_price = valid["vendor_price"].min()
         n         = len(valid)
         diff_pct  = (current_vendor_price - avg_price) / avg_price * 100
-
         if abs(diff_pct) >= 3:
             direction = "높습니다" if diff_pct > 0 else "낮습니다"
             msg = (
@@ -352,29 +592,108 @@ def render_similar_parts(volume_cm3: float, hole_count: int,
                 st.warning(f"💬 협상 근거: {msg}")
             else:
                 st.info(f"💬 참고: {msg}")
+    return similar
 
 
-# ── 메인 ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 업체별 예상 단가 시뮬레이션 계산
+# ══════════════════════════════════════════════════════════════
+def calc_vendor_simulation(
+    volume_cm3: float,
+    material_code: str,
+    form_key: str,
+    loss_rate: float,
+    hourly_rate: float,
+    estimated_hours: float,
+    difficulty_coeff: float,
+    postprocess_cost: float,
+    price_override=None,
+) -> pd.DataFrame:
+    """
+    등록된 업체별로 과거 평균 마진 비율을 적용해 예상 단가를 시뮬레이션한다.
+
+    공식:
+        재료비      = 부피 × 밀도 × 시세 × (1+로스율)
+        적정 가공비 = 임률 × 시간 × 난이도계수
+        예상 가공비 = 적정 가공비 × 업체 평균 마진 비율 (이력 없으면 1.0)
+        예상 단가   = 재료비 + 예상 가공비 + 후처리비
+    """
+    try:
+        mat_result = calc_material_cost(
+            volume_cm3=volume_cm3,
+            material_code=material_code,
+            form=form_key,
+            loss_rate_override=loss_rate,
+            price_override=price_override,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    material_cost    = mat_result["material_cost"]
+    standard_maching = hourly_rate * estimated_hours * difficulty_coeff
+
+    stats_df = load_vendor_stats()
+    if stats_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in stats_df.iterrows():
+        name         = row["name"]
+        total        = int(row["total"]) if row["total"] else 0
+        avg_margin   = float(row["avg_margin_ratio"]) if row["avg_margin_ratio"] else 1.0
+
+        if avg_margin <= 0:
+            avg_margin = 1.0
+
+        est_machining = standard_maching * avg_margin
+        est_price     = material_cost + est_machining + postprocess_cost
+        est_variance  = (est_machining / standard_maching * 100) if standard_maching > 0 else 0
+
+        if total >= 3:
+            note = f"이력 {total}건 기반 (평균 오차율 {row['avg_variance']}%)"
+        else:
+            note = f"이력 {total}건 — 참고용 (데이터 부족)"
+
+        rows.append({
+            "업체명":    name,
+            "예상단가":  round(est_price),
+            "예상가공비": round(est_machining),
+            "재료비":    round(material_cost),
+            "예상오차율": round(est_variance, 1),
+            "이력건수":  total,
+            "비고":      note,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).sort_values("예상단가")
+    return df
+
+
+# ══════════════════════════════════════════════════════════════
+# 메인
+# ══════════════════════════════════════════════════════════════
 def main():
     st.set_page_config(
-        page_title="가공 견적 AI 엔진 PRO v2.1",
+        page_title="가공 견적 AI 엔진 PRO v2.2",
         page_icon="🔧",
         layout="wide"
     )
     init_db()
 
-    # 업체 관리 탭 위치 유지용 session_state
     if "vendor_tab" not in st.session_state:
-        st.session_state.vendor_tab = 0  # 0: 목록, 1: 추가
+        st.session_state.vendor_tab = 0
 
     with st.sidebar:
-        st.markdown("### 🔧 Quote AI v2.1")
+        st.markdown("### 🔧 Quote AI v2.2")
         st.caption("가공 견적 역산 감사 시스템")
         st.divider()
 
         menu = st.radio(
             "메뉴",
-            ["📋 역산 감사", "🏢 업체 관리", "📊 업체 비교", "📁 감사 이력"],
+            ["📋 역산 감사", "📈 업체 시뮬레이션", "🏢 업체 관리",
+             "📊 업체 비교", "📁 감사 이력"],
             label_visibility="collapsed"
         )
 
@@ -395,7 +714,6 @@ def main():
         st.divider()
         hourly_rate   = st.number_input("임률 (원/h)", min_value=10000, max_value=200000,
                                         value=45000, step=1000)
-
         st.caption("시세 설정")
         use_override   = st.toggle("수동 입력")
         price_override = None
@@ -416,6 +734,9 @@ def main():
     if menu == "📋 역산 감사":
         page_audit(mat_df, sel_mat_code, mat_info, form_key,
                    loss_rate, hourly_rate, price_override)
+    elif menu == "📈 업체 시뮬레이션":
+        page_simulation(mat_df, sel_mat_code, mat_info, form_key,
+                        loss_rate, hourly_rate, price_override)
     elif menu == "🏢 업체 관리":
         page_vendors()
     elif menu == "📊 업체 비교":
@@ -424,10 +745,11 @@ def main():
         page_history()
 
 
-# ── 페이지: 역산 감사 ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 페이지: 역산 감사
+# ══════════════════════════════════════════════════════════════
 def page_audit(mat_df, sel_mat_code, mat_info, form_key,
                loss_rate, hourly_rate, price_override):
-    """역산 감사 메인 페이지."""
     st.title("📋 역산 감사")
     col_left, col_right = st.columns([1, 1], gap="large")
 
@@ -467,11 +789,6 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
                     c1.metric("X", f"{bb.get('x_mm', 0):.1f} mm")
                     c2.metric("Y", f"{bb.get('y_mm', 0):.1f} mm")
                     c3.metric("Z", f"{bb.get('z_mm', 0):.1f} mm")
-                    st.caption(
-                        f"홀: {hole_count}개 "
-                        f"(심공: {sum(1 for h in holes if h['is_deep'])}개) · "
-                        f"셋업 추정: {setup_count}회"
-                    )
             else:
                 st.info("pythonOCC 미설치 — 수동 입력 모드")
 
@@ -486,7 +803,7 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
             st.number_input("바운딩박스 부피 (cm³) — STEP 자동",
                             value=volume_cm3, disabled=True)
         if hole_count is None:
-            hole_count  = st.number_input("홀 개수",  min_value=0, value=0, step=1)
+            hole_count  = st.number_input("홀 개수", min_value=0, value=0, step=1)
         if setup_count is None:
             setup_count = st.number_input("셋업 횟수", min_value=1, value=1, step=1)
 
@@ -618,7 +935,7 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
                 )
                 st.success("이력 저장 완료")
 
-                # 방금 저장된 이력 ID 조회 (유사 부품 검색 시 자기 자신 제외용)
+                # 방금 저장된 ID
                 try:
                     conn = sqlite3.connect(DB_PATH)
                     last_id = conn.execute(
@@ -628,8 +945,8 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
                 except Exception:
                     last_id = None
 
-                # 유사 부품 매칭 표시
-                render_similar_parts(
+                # 유사 부품 매칭
+                similar_df = render_similar_parts(
                     volume_cm3=float(volume_cm3),
                     hole_count=int(hole_count),
                     setup_count=int(setup_count),
@@ -637,22 +954,182 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
                     saved_id=last_id,
                 )
 
+                # ── 협상 근거 엑셀 다운로드 ──────────────────
+                st.divider()
+                st.subheader("📥 협상 근거 리포트")
+
+                # 시뮬레이션도 함께 포함
+                sim_df = calc_vendor_simulation(
+                    volume_cm3=float(volume_cm3),
+                    material_code=sel_mat_code,
+                    form_key=form_key,
+                    loss_rate=loss_rate,
+                    hourly_rate=hourly_rate,
+                    estimated_hours=estimated_hours,
+                    difficulty_coeff=difficulty_coeff,
+                    postprocess_cost=postprocess_cost,
+                    price_override=price_override,
+                )
+
+                excel_bytes = build_report_excel(
+                    part_name=part_name,
+                    part_no=part_no or "",
+                    vendor_name=vendor_name or "",
+                    material_code=sel_mat_code,
+                    result=result,
+                    difficulty_level=difficulty_level,
+                    estimated_hours=estimated_hours,
+                    similar_df=similar_df if isinstance(similar_df, pd.DataFrame) else pd.DataFrame(),
+                    sim_df=sim_df if not sim_df.empty else None,
+                    audit_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                )
+                fname = f"협상근거_{part_name}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                st.download_button(
+                    "📊 협상 근거 엑셀 다운로드",
+                    data=excel_bytes,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+
             except Exception as e:
                 st.error(f"감사 실행 오류: {e}")
 
 
-# ── 페이지: 업체 관리 ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 페이지: 업체별 예상 단가 시뮬레이션
+# ══════════════════════════════════════════════════════════════
+def page_simulation(mat_df, sel_mat_code, mat_info, form_key,
+                    loss_rate, hourly_rate, price_override):
+    st.title("📈 업체별 예상 단가 시뮬레이션")
+    st.caption(
+        "신규 부품 발주 전, 등록 업체별 과거 마진 패턴을 적용해 "
+        "예상 단가를 추정합니다. 이력 3건 이상인 업체만 신뢰도가 높습니다."
+    )
+
+    col_l, col_r = st.columns([1, 1], gap="large")
+
+    with col_l:
+        st.subheader("부품 사양 입력")
+        sim_part_name    = st.text_input("부품명 (참고용)")
+        sim_volume       = st.number_input("바운딩박스 부피 (cm³)",
+                                           min_value=0.1, value=100.0, step=10.0,
+                                           key="sim_vol")
+        sim_hole         = st.number_input("홀 개수", min_value=0, value=0, step=1,
+                                           key="sim_hole")
+        sim_setup        = st.number_input("셋업 횟수", min_value=1, value=1, step=1,
+                                           key="sim_setup")
+        sim_pp           = st.number_input("후처리비 (원)", min_value=0, value=0,
+                                           step=1000, key="sim_pp")
+
+        st.subheader("난이도")
+        diff_opts   = get_all_options()
+        sim_diff_s  = st.selectbox("난이도 등급", diff_opts, key="sim_diff")
+        sim_diff_lv = parse_level_from_option(sim_diff_s)
+        sim_coeff   = get_coefficient(sim_diff_lv)
+        st.caption(f"계수: **{sim_coeff}**")
+
+        sim_hours = st.number_input("예상 가공시간 (h)",
+                                    min_value=0.1, value=1.0, step=0.1,
+                                    key="sim_hours")
+
+        run_sim = st.button("🔍 시뮬레이션 실행", type="primary",
+                            use_container_width=True)
+
+    with col_r:
+        st.subheader("결과")
+        if run_sim:
+            sim_df = calc_vendor_simulation(
+                volume_cm3=float(sim_volume),
+                material_code=sel_mat_code,
+                form_key=form_key,
+                loss_rate=loss_rate,
+                hourly_rate=hourly_rate,
+                estimated_hours=sim_hours,
+                difficulty_coeff=sim_coeff,
+                postprocess_cost=sim_pp,
+                price_override=price_override,
+            )
+
+            if sim_df.empty:
+                st.info("등록된 업체가 없거나 이력이 부족합니다.")
+            else:
+                # 순위 표시
+                st.markdown("##### 예상 단가 순위 (낮은 순)")
+                for rank, (_, row) in enumerate(sim_df.iterrows(), 1):
+                    pct   = row["예상오차율"]
+                    price = row["예상단가"]
+                    total = row["이력건수"]
+
+                    if pct > 110:
+                        color = "🔴"
+                    elif pct < 80:
+                        color = "🔵"
+                    else:
+                        color = "🟢"
+
+                    reliability = "★★★" if total >= 5 else ("★★☆" if total >= 3 else "★☆☆")
+                    st.metric(
+                        label=f"{rank}위  {color}  {row['업체명']}  {reliability}",
+                        value=f"{price:,.0f} 원",
+                        delta=f"예상 오차율 {pct:.1f}%",
+                        delta_color="inverse",
+                    )
+
+                st.divider()
+                st.dataframe(
+                    sim_df[["업체명", "예상단가", "예상가공비", "재료비",
+                            "예상오차율", "이력건수", "비고"]].rename(columns={
+                        "예상단가": "예상 단가(원)", "예상가공비": "예상 가공비(원)",
+                        "재료비": "재료비(원)", "예상오차율": "예상 오차율(%)",
+                        "이력건수": "이력 건수",
+                    }),
+                    hide_index=True, use_container_width=True,
+                    column_config={
+                        "예상 단가(원)":  st.column_config.NumberColumn(format="%,.0f"),
+                        "예상 가공비(원)": st.column_config.NumberColumn(format="%,.0f"),
+                        "재료비(원)":     st.column_config.NumberColumn(format="%,.0f"),
+                        "예상 오차율(%)": st.column_config.NumberColumn(format="%.1f %%"),
+                    }
+                )
+                st.caption("★★★ 이력 5건↑  ★★☆ 3~4건  ★☆☆ 1~2건 (신뢰도 낮음)")
+
+                # 엑셀 다운로드
+                excel_bytes = build_report_excel(
+                    part_name=sim_part_name or "신규부품",
+                    part_no="",
+                    vendor_name="시뮬레이션",
+                    material_code=sel_mat_code,
+                    result=audit(
+                        vendor_price=float(sim_df["예상단가"].iloc[0]),
+                        material_cost=float(sim_df["재료비"].iloc[0]),
+                        hourly_rate=hourly_rate,
+                        estimated_hours=sim_hours,
+                        difficulty_coeff=sim_coeff,
+                        postprocess_cost=sim_pp,
+                    ),
+                    difficulty_level=sim_diff_lv,
+                    estimated_hours=sim_hours,
+                    similar_df=pd.DataFrame(),
+                    sim_df=sim_df,
+                    audit_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                )
+                fname = f"시뮬레이션_{sim_part_name or '신규'}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                st.download_button(
+                    "📥 시뮬레이션 결과 엑셀 다운로드",
+                    data=excel_bytes,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+
+# ══════════════════════════════════════════════════════════════
+# 페이지: 업체 관리
+# ══════════════════════════════════════════════════════════════
 def page_vendors():
-    """
-    업체 등록·수정·비활성화 페이지.
-    탭 위치를 st.session_state.vendor_tab으로 유지하여
-    신규 등록 후 rerun 시 탭이 초기화되는 버그를 수정.
-    """
     st.title("🏢 업체 관리")
 
-    # ── 신규 등록 폼 (탭 바깥, 상단 고정) ────────────────────
-    # 탭 내부에서 rerun하면 항상 첫 번째 탭으로 돌아가는 Streamlit 제약을 피하기 위해
-    # 등록 폼을 expander로 분리하고, session_state로 열림 여부를 제어한다.
     if "show_add_vendor" not in st.session_state:
         st.session_state.show_add_vendor = False
 
@@ -670,9 +1147,8 @@ def page_vendors():
                 contact = c2.text_input("담당자명")
                 phone   = c1.text_input("연락처", placeholder="010-0000-0000")
                 email   = c2.text_input("이메일")
-                note    = st.text_area("메모", height=80,
-                                       placeholder="거래 특이사항, 전문 분야 등")
-                col_s, col_c = st.columns([1, 1])
+                note    = st.text_area("메모", height=80)
+                col_s, col_c = st.columns(2)
                 submitted = col_s.form_submit_button("✅ 등록", type="primary",
                                                      use_container_width=True)
                 cancelled = col_c.form_submit_button("취소", use_container_width=True)
@@ -691,7 +1167,6 @@ def page_vendors():
 
     st.divider()
 
-    # ── 등록 업체 목록 ────────────────────────────────────────
     vendors_df = load_vendors()
     if vendors_df.empty:
         st.info("등록된 업체가 없습니다. [업체 추가] 버튼을 눌러 등록해주세요.")
@@ -723,13 +1198,13 @@ def page_vendors():
                 if int(s["total"]) >= 5:
                     avg_v = float(s["avg_variance"])
                     if avg_v > 115:
-                        msg = f"⚠ 전반적으로 오차율이 높습니다 (평균 {avg_v:.1f}%). 항목별 소명 요청을 검토하세요."
+                        msg = f"⚠ 오차율 높음 (평균 {avg_v:.1f}%). 항목별 소명 요청 검토."
                     elif avg_v > 105:
-                        msg = f"🔶 소폭 과다 경향 (평균 {avg_v:.1f}%). 단가 재협의 여지가 있습니다."
+                        msg = f"🔶 소폭 과다 경향 (평균 {avg_v:.1f}%). 단가 재협의 여지 있음."
                     elif avg_v >= 90:
-                        msg = f"✅ 전반적으로 적정 수준입니다 (평균 {avg_v:.1f}%)."
+                        msg = f"✅ 적정 수준 (평균 {avg_v:.1f}%)."
                     else:
-                        msg = f"🔵 저가 경향 (평균 {avg_v:.1f}%). 품질 조건을 명기하고 진행하세요."
+                        msg = f"🔵 저가 경향 (평균 {avg_v:.1f}%). 품질 조건 명기 권장."
                     st.info(msg)
 
                 hist = load_vendor_history(vid)
@@ -769,9 +1244,10 @@ def page_vendors():
                     st.rerun()
 
 
-# ── 페이지: 업체 비교 ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 페이지: 업체 비교
+# ══════════════════════════════════════════════════════════════
 def page_compare():
-    """업체별 오차율 통계 및 형번별 단가 비교 페이지."""
     st.title("📊 업체 비교")
 
     stats_df = load_vendor_stats()
@@ -801,7 +1277,7 @@ def page_compare():
     )
 
     st.subheader("형번별 단가 비교")
-    conn     = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     try:
         cross_df = pd.read_sql("""
             SELECT h.part_no, h.part_name, v.name AS vendor_name,
@@ -833,59 +1309,34 @@ def page_compare():
         )
 
 
-# ── 페이지: 감사 이력 ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 페이지: 감사 이력
+# ══════════════════════════════════════════════════════════════
 def page_history():
-    """
-    감사 이력 조회 페이지.
-    검색 조건: 판정 / 업체 / 통합 텍스트 / 날짜 범위 / 오차율 범위
-    """
     st.title("📁 감사 이력")
     df = load_history()
     if df.empty:
         st.info("저장된 이력이 없습니다.")
         return
 
-    # ── 검색 필터 ─────────────────────────────────────────────
     with st.expander("🔎 검색 필터", expanded=True):
-        row1_c1, row1_c2, row1_c3 = st.columns(3)
-        f_verdict = row1_c1.multiselect(
-            "판정",
-            df["verdict"].dropna().unique().tolist()
-        )
-        f_vendor  = row1_c2.multiselect(
-            "업체",
-            df["vendor_name"].dropna().unique().tolist()
-        )
-        f_text    = row1_c3.text_input(
-            "통합 검색",
-            placeholder="부품명 / 형번 / 메모",
-            help="부품명·형번·메모를 동시에 검색합니다."
-        )
+        r1c1, r1c2, r1c3 = st.columns(3)
+        f_verdict = r1c1.multiselect("판정", df["verdict"].dropna().unique().tolist())
+        f_vendor  = r1c2.multiselect("업체", df["vendor_name"].dropna().unique().tolist())
+        f_text    = r1c3.text_input("통합 검색", placeholder="부품명 / 형번 / 메모")
 
-        row2_c1, row2_c2 = st.columns(2)
-
-        # 날짜 범위
+        r2c1, r2c2 = st.columns(2)
         df["created_at"] = pd.to_datetime(df["created_at"])
-        min_date = df["created_at"].min().date()
-        max_date = df["created_at"].max().date()
-        date_range = row2_c1.date_input(
-            "감사 일자 범위",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
-
-        # 오차율 범위
+        min_date   = df["created_at"].min().date()
+        max_date   = df["created_at"].max().date()
+        date_range = r2c1.date_input("감사 일자 범위",
+                                     value=(min_date, max_date),
+                                     min_value=min_date, max_value=max_date)
         v_min = float(df["variance_pct"].min()) if df["variance_pct"].notna().any() else 0.0
         v_max = float(df["variance_pct"].max()) if df["variance_pct"].notna().any() else 200.0
-        variance_range = row2_c2.slider(
-            "오차율 범위 (%)",
-            min_value=0.0, max_value=300.0,
-            value=(max(0.0, v_min), min(300.0, v_max)),
-            step=1.0,
-        )
+        variance_range = r2c2.slider("오차율 범위 (%)", 0.0, 300.0,
+                                     (max(0.0, v_min), min(300.0, v_max)), 1.0)
 
-    # ── 필터 적용 ─────────────────────────────────────────────
     if f_verdict:
         df = df[df["verdict"].isin(f_verdict)]
     if f_vendor:
@@ -897,30 +1348,24 @@ def page_history():
             df["note"].str.contains(f_text, case=False, na=False)
         )
         df = df[mask]
-
-    # 날짜 범위 적용
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_dt = pd.Timestamp(date_range[0])
         end_dt   = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
         df = df[(df["created_at"] >= start_dt) & (df["created_at"] < end_dt)]
-
-    # 오차율 범위 적용
     df = df[
         df["variance_pct"].isna() |
         ((df["variance_pct"] >= variance_range[0]) &
          (df["variance_pct"] <= variance_range[1]))
     ]
 
-    # ── 테이블 출력 ───────────────────────────────────────────
     col_map = {
-        "id": "ID",
-        "created_at": "일시", "part_name": "부품명", "part_no": "형번",
+        "id": "ID", "created_at": "일시", "part_name": "부품명", "part_no": "형번",
         "vendor_name": "업체", "vendor_price": "협력사단가",
         "material_cost": "재료비", "actual_machining": "실질가공비",
         "standard_machining": "적정가공비", "variance_pct": "오차율(%)",
         "verdict": "판정", "difficulty_level": "난이도",
         "volume_cm3": "부피(cm³)", "hole_count": "홀", "setup_count": "셋업",
-        "ordered": "발주확정", "note": "메모"
+        "note": "메모"
     }
     show_cols = [c for c in col_map if c in df.columns]
     df_show   = df[show_cols].rename(columns=col_map)
@@ -934,31 +1379,11 @@ def page_history():
             "실질가공비": st.column_config.NumberColumn(format="%,.0f 원"),
             "적정가공비": st.column_config.NumberColumn(format="%,.0f 원"),
             "부피(cm³)":  st.column_config.NumberColumn(format="%.1f"),
-            "발주확정":   st.column_config.CheckboxColumn(),
         }
     )
+    st.caption(f"전체 {len(load_history())}건 · 표시 {len(df_show)}건")
 
-    total_cnt   = len(load_history())
-    display_cnt = len(df_show)
-    st.caption(f"전체 {total_cnt}건 · 표시 {display_cnt}건")
-
-    # ── 발주 확정 처리 ────────────────────────────────────────
     st.divider()
-    st.subheader("발주 확정 처리")
-    st.caption("실제 발주 확정 건을 표시하면 업체 패턴 분석에 반영됩니다.")
-    col_id, col_btn, _ = st.columns([1, 1, 3])
-    sel_id = col_id.number_input("감사 ID", min_value=1, step=1, label_visibility="collapsed")
-    if col_btn.button("✅ 발주 확정"):
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.execute("UPDATE history_log SET ordered=1 WHERE id=?", (sel_id,))
-            conn.commit()
-        finally:
-            conn.close()
-        st.success(f"ID {sel_id} 발주 확정 처리")
-        st.rerun()
-
-    # ── CSV 다운로드 ──────────────────────────────────────────
     csv = df_show.to_csv(index=False, encoding="utf-8-sig")
     st.download_button(
         "📥 CSV 다운로드", data=csv,
