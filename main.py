@@ -1201,17 +1201,73 @@ def page_simulation(mat_df, sel_mat_code, mat_info, form_key,
 
     with col_l:
         st.subheader("부품 사양")
-        sim_name   = st.text_input("부품명 (참고용)", key="sim_name")
-        c1, c2     = st.columns(2)
-        sim_vol    = c1.number_input("바운딩 부피 (cm³)", min_value=0.1, value=100.0, step=10.0, key="sim_vol")
-        sim_hole   = c2.number_input("홀 개수", min_value=0, value=0, step=1, key="sim_hole")
-        sim_setup  = st.number_input("셋업 횟수", min_value=1, value=1, step=1, key="sim_setup")
+
+        # ── STEP 파일 업로드 (자동 분석) ──────────────────
+        sim_step = st.file_uploader(
+            "STEP 파일 업로드 (솔리드웍스 → 다른 이름으로 저장 → STEP)",
+            type=["step","stp"], key="sim_step",
+            help="업로드하면 부피·홀·셋업을 자동으로 추출합니다."
+        )
+
+        sim_name    = st.text_input("부품명 (참고용)", key="sim_name")
+        sim_vol     = None
+        sim_hole    = None
+        sim_setup   = None
+        sim_auto_diff = None
+
+        if sim_step is not None:
+            if is_step_available():
+                with st.spinner("STEP 분석 중..."):
+                    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
+                        tmp.write(sim_step.read())
+                        tmp_path = tmp.name
+                    mac      = float(mat_info.get("machinability", 1.0))
+                    res_step = analyze_step_file(tmp_path, mac)
+                    os.unlink(tmp_path)
+                if res_step["error"]:
+                    st.error(f"분석 오류: {res_step['error']}")
+                else:
+                    bb            = res_step["bounding_box"]
+                    sim_vol       = bb.get("volume_cm3", 0)
+                    sim_hole      = len(res_step["holes"])
+                    sim_setup     = res_step["setups"]
+                    sim_auto_diff = res_step["difficulty"]
+                    st.success("✅ STEP 자동 분석 완료")
+                    ca, cb_, cc = st.columns(3)
+                    ca.metric("X", f"{bb.get('x_mm',0):.1f} mm")
+                    cb_.metric("Y", f"{bb.get('y_mm',0):.1f} mm")
+                    cc.metric("Z", f"{bb.get('z_mm',0):.1f} mm")
+                    st.caption(f"부피: {sim_vol:.1f}cm³ · 홀: {sim_hole}개 · 셋업: {sim_setup}회")
+                    if sim_auto_diff:
+                        st.info(f"자동 난이도 추정: **{sim_auto_diff['level']}등급** · {sim_auto_diff['reason']}")
+            else:
+                st.info("💡 STEP 자동 분석은 로컬 PC(pythonOCC 설치)에서만 동작합니다. 아래에 직접 입력해 주세요.")
+
+        # 수동 입력 (STEP 미업로드 또는 분석 실패 시)
+        c1, c2 = st.columns(2)
+        if sim_vol is None:
+            sim_vol   = c1.number_input("바운딩 부피 (cm³)", min_value=0.1, value=100.0, step=10.0, key="sim_vol")
+        else:
+            c1.number_input("바운딩 부피 (cm³) — 자동", value=sim_vol, disabled=True, key="sim_vol")
+        if sim_hole is None:
+            sim_hole  = c2.number_input("홀 개수", min_value=0, value=0, step=1, key="sim_hole")
+        else:
+            c2.number_input("홀 개수 — 자동", value=sim_hole, disabled=True, key="sim_hole")
+        if sim_setup is None:
+            sim_setup = st.number_input("셋업 횟수", min_value=1, value=1, step=1, key="sim_setup")
+        else:
+            st.number_input("셋업 횟수 — 자동", value=sim_setup, disabled=True, key="sim_setup")
+
         sim_pp     = st.number_input("후처리비 (원)", min_value=0, value=0, step=1000, key="sim_pp")
-        sim_diff_s = st.radio("난이도", get_all_options(), horizontal=True, key="sim_diff")
-        sim_diff_lv= parse_level_from_option(sim_diff_s)
-        sim_coeff  = get_coefficient(sim_diff_lv)
-        sim_hours  = st.number_input("예상 가공시간 (h)", min_value=0.1, value=1.0, step=0.1, key="sim_hours")
-        run_sim    = st.button("🔍 시뮬레이션 실행", type="primary", use_container_width=True)
+
+        # 난이도 — STEP 자동 추정값 있으면 기본값으로 설정
+        default_diff_idx = (sim_auto_diff["level"] - 1) if sim_auto_diff else 0
+        sim_diff_s  = st.radio("난이도", get_all_options(),
+                               index=default_diff_idx, horizontal=True, key="sim_diff")
+        sim_diff_lv = parse_level_from_option(sim_diff_s)
+        sim_coeff   = get_coefficient(sim_diff_lv)
+        sim_hours   = st.number_input("예상 가공시간 (h)", min_value=0.1, value=1.0, step=0.1, key="sim_hours")
+        run_sim     = st.button("🔍 시뮬레이션 실행", type="primary", use_container_width=True)
 
     with col_r:
         st.subheader("예상 단가 순위")
