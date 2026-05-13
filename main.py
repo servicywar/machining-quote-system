@@ -843,25 +843,41 @@ def page_audit(mat_df, sel_mat_code, mat_info, form_key,
         part_no    = st.text_input("형번", value=part_no, help="예: A001, BRKT-001")
         step_fname = st.text_input("도면 파일명", value=step_fname)
 
+        # 자동 추출값은 기본값으로 채우되 수동 수정 가능
         col_v, col_h = st.columns(2)
-        if volume_cm3 is None:
-            volume_cm3 = col_v.number_input("바운딩 부피 (cm³)", min_value=0.1, value=100.0, step=10.0)
-        else:
-            col_v.number_input("바운딩 부피 (cm³) — 자동", value=volume_cm3, disabled=True)
-        if hole_count is None:
-            hole_count = col_h.number_input("홀 개수", min_value=0, value=0, step=1)
-
-        if setup_count is None:
-            setup_count = st.number_input("셋업 횟수", min_value=1, value=1, step=1)
+        volume_cm3 = col_v.number_input(
+            "바운딩 부피 (cm³)" + (" ✏ STEP 자동" if volume_cm3 else ""),
+            min_value=0.1,
+            value=float(volume_cm3) if volume_cm3 else 100.0,
+            step=10.0,
+            help="STEP 분석값을 기본으로 채웁니다. 직접 수정 가능합니다."
+        )
+        hole_count = col_h.number_input(
+            "홀 개수" + (" ✏ STEP 자동" if hole_count is not None else ""),
+            min_value=0,
+            value=int(hole_count) if hole_count is not None else 0,
+            step=1,
+            help="STEP 분석값을 기본으로 채웁니다. 직접 수정 가능합니다."
+        )
+        setup_count = st.number_input(
+            "셋업 횟수" + (" ✏ STEP 자동" if setup_count is not None else ""),
+            min_value=1,
+            value=int(setup_count) if setup_count is not None else 1,
+            step=1,
+            help="STEP 분석 추정값입니다. 실제 셋업 횟수로 수정해 주세요."
+        )
 
         st.divider()
         st.subheader("2 · 난이도")
         if auto_diff:
-            st.info(f"자동 추정: **{auto_diff['level']}등급** · {auto_diff['reason']}")
+            st.info(
+                f"🤖 자동 추정: **{auto_diff['level']}등급** · {auto_diff['reason']}"
+                f" — 아래에서 최종 확정하세요."
+            )
             default_idx = auto_diff["level"] - 1
         else:
             default_idx = 0
-        selected_diff    = st.radio("난이도 등급", get_all_options(),
+        selected_diff    = st.radio("난이도 등급 (최종 확정)", get_all_options(),
                                     index=default_idx, horizontal=True)
         difficulty_level = parse_level_from_option(selected_diff)
         difficulty_coeff = get_coefficient(difficulty_level)
@@ -1243,20 +1259,26 @@ def page_simulation(mat_df, sel_mat_code, mat_info, form_key,
             else:
                 st.info("💡 STEP 자동 분석은 로컬 PC(pythonOCC 설치)에서만 동작합니다. 아래에 직접 입력해 주세요.")
 
-        # 수동 입력 (STEP 미업로드 또는 분석 실패 시)
+        # 자동 추출값은 기본값으로 채우되 수동 수정 가능
         c1, c2 = st.columns(2)
-        if sim_vol is None:
-            sim_vol   = c1.number_input("바운딩 부피 (cm³)", min_value=0.1, value=100.0, step=10.0, key="sim_vol")
-        else:
-            c1.number_input("바운딩 부피 (cm³) — 자동", value=sim_vol, disabled=True, key="sim_vol")
-        if sim_hole is None:
-            sim_hole  = c2.number_input("홀 개수", min_value=0, value=0, step=1, key="sim_hole")
-        else:
-            c2.number_input("홀 개수 — 자동", value=sim_hole, disabled=True, key="sim_hole")
-        if sim_setup is None:
-            sim_setup = st.number_input("셋업 횟수", min_value=1, value=1, step=1, key="sim_setup")
-        else:
-            st.number_input("셋업 횟수 — 자동", value=sim_setup, disabled=True, key="sim_setup")
+        sim_vol   = c1.number_input(
+            "바운딩 부피 (cm³)" + (" ✏ STEP 자동" if sim_vol else ""),
+            min_value=0.1, value=float(sim_vol) if sim_vol else 100.0,
+            step=10.0, key="sim_vol",
+            help="STEP 분석값을 기본으로 채웁니다. 직접 수정 가능합니다."
+        )
+        sim_hole  = c2.number_input(
+            "홀 개수" + (" ✏ STEP 자동" if sim_hole is not None else ""),
+            min_value=0, value=int(sim_hole) if sim_hole is not None else 0,
+            step=1, key="sim_hole",
+            help="STEP 분석값을 기본으로 채웁니다. 직접 수정 가능합니다."
+        )
+        sim_setup = st.number_input(
+            "셋업 횟수" + (" ✏ STEP 자동" if sim_setup is not None else ""),
+            min_value=1, value=int(sim_setup) if sim_setup is not None else 1,
+            step=1, key="sim_setup",
+            help="STEP 분석 추정값입니다. 실제 셋업 횟수로 수정해 주세요."
+        )
 
         sim_pp     = st.number_input("후처리비 (원)", min_value=0, value=0, step=1000, key="sim_pp")
 
