@@ -1,0 +1,4 @@
+data/history_log.db
+__pycache__/
+*.pyc
+.env
